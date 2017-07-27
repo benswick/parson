@@ -34,6 +34,9 @@
 #define TEST(A) printf("%d %-72s-", __LINE__, #A);\
                 if(A){puts(" OK");tests_passed++;}\
                 else{puts(" FAIL");tests_failed++;}
+#define TEST_FAIL_MSG(A, B) printf("%d %-72s-", __LINE__, #A);\
+                if(A){puts(" OK");tests_passed++;}\
+                else{printf(" FAIL ");puts(B);tests_failed++;}
 #define STREQ(A, B) ((A) && (B) ? strcmp((A), (B)) == 0 : 0)
 #define EPSILON 0.000001
 
@@ -52,6 +55,7 @@ void test_suite_9(void); /* Test serialization (pretty) */
 void print_commits_info(const char *username, const char *repo);
 void persistence_example(void);
 void serialization_example(void);
+const char* get_error_type_text(enum json_parse_error_type);
 
 static char * read_file(const char * filename);
 
@@ -81,12 +85,20 @@ int main() {
 
 void test_suite_1(void) {
     JSON_Value *val;
+    JSON_Parse_Options options;
+    JSON_Parse_Error error;
+
+    options.accept_comments = 0;
+    options.string_is_file_path = 1;
+
     TEST((val = json_parse_file("tests/test_1_1.txt")) != NULL);
     TEST(json_value_equals(json_parse_string(json_serialize_to_string(val)), val));
     TEST(json_value_equals(json_parse_string(json_serialize_to_string_pretty(val)), val));
     if (val) { json_value_free(val); }
 
-    TEST((val = json_parse_file("tests/test_1_2.txt")) == NULL); /* Over 2048 levels of nesting */
+
+    TEST((val = json_parse("tests/test_1_2.txt", &options, &error)) == NULL); /* Over 2048 levels of nesting */
+    TEST(error.error == JSON_PARSE_ERROR_MAX_NESTING_EXCEEDED);
     if (val) { json_value_free(val); }
 
     TEST((val = json_parse_file("tests/test_1_3.txt")) != NULL);
@@ -99,7 +111,9 @@ void test_suite_1(void) {
     TEST(json_value_equals(json_parse_string(json_serialize_to_string_pretty(val)), val));
     if (val) { json_value_free(val); }
 
-    TEST((val = json_parse_file_with_comments("tests/test_1_2.txt")) == NULL); /* Over 2048 levels of nesting */
+    options.accept_comments = 1;
+    TEST((val = json_parse("tests/test_1_2.txt", &options, &error)) == NULL); /* Over 2048 levels of nesting */
+    TEST(error.error == JSON_PARSE_ERROR_MAX_NESTING_EXCEEDED);
     if (val) { json_value_free(val); }
 
     TEST((val = json_parse_file_with_comments("tests/test_1_3.txt")) != NULL);
@@ -204,7 +218,7 @@ void test_suite_2(JSON_Value *root_value) {
 
     TEST(json_object_get_object(root_object, "empty object") != NULL);
     TEST(json_object_get_array(root_object, "empty array") != NULL);
-    
+
     TEST(json_object_get_wrapping_value(root_object) == root_value);
     array = json_object_get_array(root_object, "string array");
     array_value = json_object_get_value(root_object, "string array");
@@ -233,59 +247,77 @@ void test_suite_2_with_comments(void) {
     json_value_free(root_value);
 }
 
+#define TEST_PARSE_SUCCESS(A, ERR) TEST(json_parse((A), NULL, &ERR) != NULL);\
+                                   TEST_FAIL_MSG(ERR.error == JSON_PARSE_ERROR_NONE, get_error_type_text(ERR.error));
+#define TEST_PARSE_FAILURE(A, ERR, ERR_TYPE) TEST(json_parse((A), NULL, &ERR) == NULL);\
+                                             TEST_FAIL_MSG(ERR.error == ERR_TYPE, get_error_type_text(ERR.error));
+
 void test_suite_3(void) {
+    JSON_Parse_Error error;
+
     puts("Testing valid strings:");
-    TEST(json_parse_string("{\"lorem\":\"ipsum\"}") != NULL);
-    TEST(json_parse_string("[\"lorem\"]") != NULL);
-    TEST(json_parse_string("null") != NULL);
-    TEST(json_parse_string("true") != NULL);
-    TEST(json_parse_string("false") != NULL);
-    TEST(json_parse_string("\"string\"") != NULL);
-    TEST(json_parse_string("123") != NULL);
+    TEST_PARSE_SUCCESS("{\"lorem\":\"ipsum\"}", error);
+    TEST_PARSE_SUCCESS("[\"lorem\"]", error);
+    TEST_PARSE_SUCCESS("null", error);
+    TEST_PARSE_SUCCESS("true", error);
+    TEST_PARSE_SUCCESS("false", error);
+    TEST_PARSE_SUCCESS("\"string\"", error);
+    TEST_PARSE_SUCCESS("123", error);
 
     puts("Testing invalid strings:");
-    TEST(json_parse_string(NULL) == NULL);
-    TEST(json_parse_string("") == NULL); /* empty string */
-    TEST(json_parse_string("[\"lorem\",]") == NULL);
-    TEST(json_parse_string("{\"lorem\":\"ipsum\",}") == NULL);
-    TEST(json_parse_string("{lorem:ipsum}") == NULL);
-    TEST(json_parse_string("[,]") == NULL);
-    TEST(json_parse_string("[,") == NULL);
-    TEST(json_parse_string("[") == NULL);
-    TEST(json_parse_string("]") == NULL);
-    TEST(json_parse_string("{\"a\":0,\"a\":0}") == NULL); /* duplicate keys */
-    TEST(json_parse_string("{:,}") == NULL);
-    TEST(json_parse_string("{,}") == NULL);
-    TEST(json_parse_string("{,") == NULL);
-    TEST(json_parse_string("{:") == NULL);
-    TEST(json_parse_string("{") == NULL);
-    TEST(json_parse_string("}") == NULL);
-    TEST(json_parse_string("x") == NULL);
-    TEST(json_parse_string("{:\"no name\"}") == NULL);
-    TEST(json_parse_string("[,\"no first value\"]") == NULL);
-    TEST(json_parse_string("[\"\\u00zz\"]") == NULL); /* invalid utf value */
-    TEST(json_parse_string("[\"\\u00\"]") == NULL); /* invalid utf value */
-    TEST(json_parse_string("[\"\\u\"]") == NULL); /* invalid utf value */
-    TEST(json_parse_string("[\"\\\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\"\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\0\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\a\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\b\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\t\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\n\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\f\"]") == NULL); /* control character */
-    TEST(json_parse_string("[\"\r\"]") == NULL); /* control character */
-    TEST(json_parse_string("[0x2]") == NULL);    /* hex */
-    TEST(json_parse_string("[0X2]") == NULL);    /* HEX */
-    TEST(json_parse_string("[07]") == NULL);     /* octals */
-    TEST(json_parse_string("[0070]") == NULL);
-    TEST(json_parse_string("[07.0]") == NULL);
-    TEST(json_parse_string("[-07]") == NULL);
-    TEST(json_parse_string("[-007]") == NULL);
-    TEST(json_parse_string("[-07.0]") == NULL);
-    TEST(json_parse_string("[\"\\uDF67\\uD834\"]") == NULL); /* wrong order surrogate pair */
-    TEST(json_parse_string("[1.7976931348623157e309]") == NULL);
-    TEST(json_parse_string("[-1.7976931348623157e309]") == NULL);
+    TEST_PARSE_FAILURE(NULL, error, JSON_PARSE_ERROR_NO_INPUT);
+    TEST_PARSE_FAILURE("", error, JSON_PARSE_ERROR_UNEXPECTED_END_OF_DATA); /* empty string */
+    TEST_PARSE_FAILURE("[\"lorem\",]", error, JSON_PARSE_ERROR_TRAILING_COMMA);
+    TEST_PARSE_FAILURE("\"string", error, JSON_PARSE_ERROR_UNTERMINATED_STRING);
+    TEST_PARSE_FAILURE("{\"lorem\":\"ipsum\",}", error, JSON_PARSE_ERROR_TRAILING_COMMA);
+    TEST_PARSE_FAILURE("{lorem:ipsum}", error, JSON_PARSE_ERROR_UNQUOTED_STRING);
+    TEST_PARSE_FAILURE("{\"lorem\":ipsum}", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("{\"lorem\"\"ipsum\"}", error, JSON_PARSE_ERROR_MISSING_COLON);
+    TEST_PARSE_FAILURE("{\"a\":\"b\"\"c\"}", error, JSON_PARSE_ERROR_MISSING_COMMA);
+    TEST_PARSE_FAILURE("[,]", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("[,", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("[", error, JSON_PARSE_ERROR_MISSING_BRACKET);
+    TEST_PARSE_FAILURE("]", error, JSON_PARSE_ERROR_UNMATCHED_BRACKET);
+    TEST_PARSE_FAILURE("[],", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("[]]", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("{} \"a\"", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("{\"a\":0,\"a\":0}", error, JSON_PARSE_ERROR_OBJECT_PROPERTY_ALREADY_EXISTS); /* duplicate keys */
+    TEST_PARSE_FAILURE("{:,}", error, JSON_PARSE_ERROR_MISSING_PROPERTY_NAME);
+    TEST_PARSE_FAILURE("{,}", error, JSON_PARSE_ERROR_MISSING_PROPERTY_NAME);
+    TEST_PARSE_FAILURE("{,", error, JSON_PARSE_ERROR_MISSING_PROPERTY_NAME);
+    TEST_PARSE_FAILURE("{:", error, JSON_PARSE_ERROR_MISSING_PROPERTY_NAME);
+    TEST_PARSE_FAILURE("{", error, JSON_PARSE_ERROR_MISSING_BRACKET);
+    TEST_PARSE_FAILURE("}", error, JSON_PARSE_ERROR_UNMATCHED_BRACKET);
+    TEST_PARSE_FAILURE("x", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("{:\"no name\"}", error, JSON_PARSE_ERROR_MISSING_PROPERTY_NAME);
+    TEST_PARSE_FAILURE("[,\"no first value\"]", error, JSON_PARSE_ERROR_UNEXPECTED_CHARACTER);
+    TEST_PARSE_FAILURE("[\"\\u00zz\"]", error, JSON_PARSE_ERROR_INVALID_UTF16_SEQUENCE); /* invalid utf value */
+    TEST_PARSE_FAILURE("[\"\\u00\"]", error, JSON_PARSE_ERROR_INVALID_UTF16_SEQUENCE); /* invalid utf value */
+    TEST_PARSE_FAILURE("[\"\\u\"]", error, JSON_PARSE_ERROR_INVALID_UTF16_SEQUENCE); /* invalid utf value */
+    TEST_PARSE_FAILURE("[\"\\\"]", error, JSON_PARSE_ERROR_UNTERMINATED_STRING);
+    TEST_PARSE_FAILURE("[\"\"\"]", error, JSON_PARSE_ERROR_MISSING_COMMA);
+    TEST_PARSE_FAILURE("[\"\0\"]", error, JSON_PARSE_ERROR_UNTERMINATED_STRING);
+    TEST_PARSE_FAILURE("[\"\a\"]", error, JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER); /* control character */
+    TEST_PARSE_FAILURE("[\"\b\"]", error, JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER); /* control character */
+    TEST_PARSE_FAILURE("[\"\t\"]", error, JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER); /* control character */
+    TEST_PARSE_FAILURE("[\"\n\"]", error, JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER); /* control character */
+    TEST_PARSE_FAILURE("[\"\f\"]", error, JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER); /* control character */
+    TEST_PARSE_FAILURE("[\"\r\"]", error, JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER); /* control character */
+    TEST_PARSE_FAILURE("[\"\\y\"]", error, JSON_PARSE_ERROR_INVALID_ESCAPE_CHARACTER);
+    TEST_PARSE_FAILURE("[not_null]", error, JSON_PARSE_ERROR_UNQUOTED_STRING);
+    TEST_PARSE_FAILURE("[totally_not_true]", error, JSON_PARSE_ERROR_UNQUOTED_STRING);
+    TEST_PARSE_FAILURE("[fakefalse]", error, JSON_PARSE_ERROR_UNQUOTED_STRING);
+    TEST_PARSE_FAILURE("[0x2]", error, JSON_PARSE_ERROR_INVALID_NUMBER);    /* hex */
+    TEST_PARSE_FAILURE("[0X2]", error, JSON_PARSE_ERROR_INVALID_NUMBER);    /* HEX */
+    TEST_PARSE_FAILURE("[07]", error, JSON_PARSE_ERROR_INVALID_NUMBER);     /* octals */
+    TEST_PARSE_FAILURE("[0070]", error, JSON_PARSE_ERROR_INVALID_NUMBER);
+    TEST_PARSE_FAILURE("[07.0]", error, JSON_PARSE_ERROR_INVALID_NUMBER);
+    TEST_PARSE_FAILURE("[-07]", error, JSON_PARSE_ERROR_INVALID_NUMBER);
+    TEST_PARSE_FAILURE("[-007]", error, JSON_PARSE_ERROR_INVALID_NUMBER);
+    TEST_PARSE_FAILURE("[-07.0]", error, JSON_PARSE_ERROR_INVALID_NUMBER);
+    TEST_PARSE_FAILURE("[\"\\uDF67\\uD834\"]", error, JSON_PARSE_ERROR_INVALID_UTF16_SEQUENCE); /* wrong order surrogate pair */
+    TEST_PARSE_FAILURE("[1.7976931348623157e309]", error, JSON_PARSE_ERROR_INVALID_NUMBER);
+    TEST_PARSE_FAILURE("[-1.7976931348623157e309]", error, JSON_PARSE_ERROR_INVALID_NUMBER);
 }
 
 void test_suite_4() {
@@ -372,7 +404,7 @@ void test_suite_5(void) {
     val_parent = json_value_init_null();
     TEST(json_array_replace_value(interests_arr, 0, val_parent) == JSONSuccess);
     TEST(json_array_replace_value(interests_arr, 0, val_parent) == JSONFailure);
-    
+
     TEST(json_object_remove(obj, "interests") == JSONSuccess);
 
     /* UTF-8 tests */
@@ -583,4 +615,31 @@ static char * read_file(const char * filename) {
     fclose(fp);
     file_contents[file_size] = '\0';
     return file_contents;
+}
+
+const char* get_error_type_text(enum json_parse_error_type err)
+{
+    switch (err) {
+        case JSON_PARSE_ERROR_NONE: return "None";
+        case JSON_PARSE_ERROR_NO_INPUT: return "No Input";
+        case JSON_PARSE_ERROR_OUT_OF_MEMORY: return "Out of Memory";
+        case JSON_PARSE_ERROR_INTERNAL: return "Internal";
+        case JSON_PARSE_ERROR_MAX_NESTING_EXCEEDED: return "Max Nesting Exceeded";
+        case JSON_PARSE_ERROR_UNEXPECTED_END_OF_DATA: return "Unexpected End of Data";
+        case JSON_PARSE_ERROR_UNEXPECTED_CHARACTER: return "Unexpected Character";
+        case JSON_PARSE_ERROR_INVALID_UTF16_SEQUENCE: return "Invalid UTF16 Sequence";
+        case JSON_PARSE_ERROR_INVALID_ESCAPE_CHARACTER: return "Invalid Escape Character";
+        case JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER: return "Invalid Control Character";
+        case JSON_PARSE_ERROR_UNTERMINATED_STRING: return "Unterminated String";
+        case JSON_PARSE_ERROR_UNQUOTED_STRING: return "Unquoted String";
+        case JSON_PARSE_ERROR_INVALID_NUMBER: return "Invalid Number";
+        case JSON_PARSE_ERROR_MISSING_PROPERTY_NAME: return "Missing Property Name";
+        case JSON_PARSE_ERROR_MISSING_COLON: return "Missing Colon";
+        case JSON_PARSE_ERROR_OBJECT_PROPERTY_ALREADY_EXISTS: return "Object Property Already Exists";
+        case JSON_PARSE_ERROR_MISSING_BRACKET: return "Missing Bracket";
+        case JSON_PARSE_ERROR_UNMATCHED_BRACKET: return "Unmatched Bracket";
+        case JSON_PARSE_ERROR_MISSING_COMMA: return "Missing Comma";
+        case JSON_PARSE_ERROR_TRAILING_COMMA: return "Trailing Comma";
+        default: return "new error type";
+    }
 }

@@ -36,6 +36,7 @@ typedef struct json_object_t JSON_Object;
 typedef struct json_array_t  JSON_Array;
 typedef struct json_value_t  JSON_Value;
 
+
 enum json_value_type {
     JSONError   = -1,
     JSONNull    = 1,
@@ -52,6 +53,41 @@ enum json_result_t {
     JSONFailure = -1
 };
 typedef int JSON_Status;
+
+enum json_parse_error_type {
+    JSON_PARSE_ERROR_NONE = 0,
+    JSON_PARSE_ERROR_NO_INPUT,                  /* string is NULL or file could not be opened */
+    JSON_PARSE_ERROR_OUT_OF_MEMORY,             /* memory allocation failed */
+    JSON_PARSE_ERROR_INTERNAL,                  /* probably a bug in the parser */
+    JSON_PARSE_ERROR_MAX_NESTING_EXCEEDED,
+    JSON_PARSE_ERROR_UNEXPECTED_END_OF_DATA,
+    JSON_PARSE_ERROR_UNEXPECTED_CHARACTER,
+    JSON_PARSE_ERROR_INVALID_UTF16_SEQUENCE,    /* string contains an invalid UTF16 \u#### sequence */
+    JSON_PARSE_ERROR_INVALID_ESCAPE_CHARACTER,  /* Escape character \ is followed by an invalid character */
+    JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER, /* Control character 0x00-0x19 found in string literal */
+    JSON_PARSE_ERROR_UNTERMINATED_STRING,       /* string literal is missing its closing quotation mark */
+    JSON_PARSE_ERROR_UNQUOTED_STRING,           /* encountered a string missing quotation marks */
+    JSON_PARSE_ERROR_INVALID_NUMBER,            /* property value is not a valid number */
+    JSON_PARSE_ERROR_MISSING_PROPERTY_NAME,
+    JSON_PARSE_ERROR_MISSING_COLON,             /* property name must be followed by a ':' */
+    JSON_PARSE_ERROR_OBJECT_PROPERTY_ALREADY_EXISTS,
+    JSON_PARSE_ERROR_MISSING_BRACKET,           /* closing } or ] is missing */
+    JSON_PARSE_ERROR_UNMATCHED_BRACKET,         /* closing } or ] without a corresponding { or [ */
+    JSON_PARSE_ERROR_MISSING_COMMA,             /* something like "element1""element2" */
+    JSON_PARSE_ERROR_TRAILING_COMMA             /* Trailing comma found after the last value in an object or array */
+};
+
+typedef struct json_parse_error_t {
+    enum json_parse_error_type error;
+    size_t byte_offset; /* byte offset from the beginning of the string or file */
+    size_t line;
+    size_t line_offset; /* in bytes */
+} JSON_Parse_Error;
+
+typedef struct json_parse_option_t {
+    int accept_comments;
+    int string_is_file_path;
+} JSON_Parse_Options;
 
 typedef void * (*JSON_Malloc_Function)(size_t);
 typedef void   (*JSON_Free_Function)(void *);
@@ -73,6 +109,10 @@ JSON_Value * json_parse_string(const char *string);
 /*  Parses first JSON value in a string and ignores comments (/ * * / and //),
     returns NULL in case of error */
 JSON_Value * json_parse_string_with_comments(const char *string);
+
+/*  Parses first JSON value in a string, returns NULL in case of error.
+    If err is not NULL it contains details of the error. */
+JSON_Value * json_parse(const char *string, const JSON_Parse_Options *parse_options, JSON_Parse_Error *err);
 
 /* Serialization */
 size_t      json_serialization_size(const JSON_Value *value); /* returns 0 on fail */
@@ -174,7 +214,7 @@ double        json_array_get_number (const JSON_Array *array, size_t index); /* 
 int           json_array_get_boolean(const JSON_Array *array, size_t index); /* returns -1 on fail */
 size_t        json_array_get_count  (const JSON_Array *array);
 JSON_Value  * json_array_get_wrapping_value(const JSON_Array *array);
-    
+
 /* Frees and removes value at given index, does nothing and returns JSONFailure if index doesn't exist.
  * Order of values in array may change during execution.  */
 JSON_Status json_array_remove(JSON_Array *array, size_t i);

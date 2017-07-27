@@ -50,6 +50,11 @@
 #define SKIP_WHITESPACES(str) while (isspace(**str)) { SKIP_CHAR(str); }
 #define MAX(a, b)             ((a) > (b) ? (a) : (b))
 
+static const JSON_Parse_Options default_options = {
+    0, /* accept comments */
+    0  /* string is a file path */
+};
+
 #undef malloc
 #undef free
 
@@ -118,17 +123,18 @@ static void         json_array_free(JSON_Array *array);
 static JSON_Value * json_value_init_string_no_copy(char *string);
 
 /* Parser */
-static JSON_Status  skip_quotes(const char **string);
+static JSON_Status  skip_quotes(const char **string, JSON_Parse_Error *err);
 static int          parse_utf16(const char **unprocessed, char **processed);
-static char *       process_string(const char *input, size_t len);
-static char *       get_quoted_string(const char **string);
-static JSON_Value * parse_object_value(const char **string, size_t nesting);
-static JSON_Value * parse_array_value(const char **string, size_t nesting);
-static JSON_Value * parse_string_value(const char **string);
-static JSON_Value * parse_boolean_value(const char **string);
-static JSON_Value * parse_number_value(const char **string);
-static JSON_Value * parse_null_value(const char **string);
-static JSON_Value * parse_value(const char **string, size_t nesting);
+static char *       process_string(const char *input, size_t len, JSON_Parse_Error *err);
+static char *       get_quoted_string(const char **string, JSON_Parse_Error *err);
+static JSON_Value * parse_object_value(const char **string, size_t nesting, JSON_Parse_Error *err);
+static JSON_Value * parse_array_value(const char **string, size_t nesting, JSON_Parse_Error *err);
+static JSON_Value * parse_string_value(const char **string, JSON_Parse_Error *err);
+static JSON_Value * parse_boolean_value(const char **string, JSON_Parse_Error *err);
+static JSON_Value * parse_number_value(const char **string, JSON_Parse_Error *err);
+static JSON_Value * parse_null_value(const char **string, JSON_Parse_Error *err);
+static JSON_Value * parse_value(const char **string, size_t nesting, JSON_Parse_Error *err);
+static void         get_line_numbers(const char *start, const char *end, JSON_Parse_Error *err);
 
 /* Serialization */
 static int    json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int level, int is_pretty, char *num_buf);
@@ -313,7 +319,7 @@ static void remove_comments(char *string, const char *start_token, const char *e
             in_string = !in_string;
         } else if (!in_string && strncmp(string, start_token, start_token_len) == 0) {
             for(i = 0; i < start_token_len; i++) {
-                string[i] = ' ';
+                string[i] = (string[i] == '\n') ? '\n' : ' ';
             }
             string = string + start_token_len;
             ptr = strstr(string, end_token);
@@ -321,7 +327,7 @@ static void remove_comments(char *string, const char *start_token, const char *e
                 return;
             }
             for (i = 0; i < (ptr - string) + end_token_len; i++) {
-                string[i] = ' ';
+                string[i] = (string[i] == '\n') ? '\n' : ' ';
             }
             string = ptr + end_token_len - 1;
         }
@@ -496,17 +502,20 @@ static JSON_Value * json_value_init_string_no_copy(char *string) {
 }
 
 /* Parser */
-static JSON_Status skip_quotes(const char **string) {
+static JSON_Status skip_quotes(const char **string, JSON_Parse_Error *err) {
     if (**string != '\"') {
+        err->error = JSON_PARSE_ERROR_UNQUOTED_STRING;
         return JSONFailure;
     }
     SKIP_CHAR(string);
     while (**string != '\"') {
         if (**string == '\0') {
+            err->error = JSON_PARSE_ERROR_UNTERMINATED_STRING;
             return JSONFailure;
         } else if (**string == '\\') {
             SKIP_CHAR(string);
             if (**string == '\0') {
+                err->error = JSON_PARSE_ERROR_UNTERMINATED_STRING;
                 return JSONFailure;
             }
         }
@@ -562,13 +571,14 @@ static int parse_utf16(const char **unprocessed, char **processed) {
 
 /* Copies and processes passed string up to supplied length.
 Example: "\u006Corem ipsum" -> lorem ipsum */
-static char* process_string(const char *input, size_t len) {
+static char* process_string(const char *input, size_t len, JSON_Parse_Error *err) {
     const char *input_ptr = input;
     size_t initial_size = (len + 1) * sizeof(char);
     size_t final_size = 0;
     char *output = NULL, *output_ptr = NULL, *resized_output = NULL;
     output = (char*)parson_malloc(initial_size);
     if (output == NULL) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
         goto error;
     }
     output_ptr = output;
@@ -586,13 +596,16 @@ static char* process_string(const char *input, size_t len) {
                 case 't':  *output_ptr = '\t'; break;
                 case 'u':
                     if (parse_utf16(&input_ptr, &output_ptr) == JSONFailure) {
+                        err->error = JSON_PARSE_ERROR_INVALID_UTF16_SEQUENCE;
                         goto error;
                     }
                     break;
                 default:
+                    err->error = JSON_PARSE_ERROR_INVALID_ESCAPE_CHARACTER;
                     goto error;
             }
         } else if ((unsigned char)*input_ptr < 0x20) {
+            err->error = JSON_PARSE_ERROR_INVALID_CONTROL_CHARACTER;
             goto error; /* 0x00-0x19 are invalid characters for json string (http://www.ietf.org/rfc/rfc4627.txt) */
         } else {
             *output_ptr = *input_ptr;
@@ -606,6 +619,7 @@ static char* process_string(const char *input, size_t len) {
     /* todo: don't resize if final_size == initial_size */
     resized_output = (char*)parson_malloc(final_size);
     if (resized_output == NULL) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
         goto error;
     }
     memcpy(resized_output, output, final_size);
@@ -618,47 +632,76 @@ error:
 
 /* Return processed contents of a string between quotes and
    skips passed argument to a matching quote. */
-static char * get_quoted_string(const char **string) {
+static char * get_quoted_string(const char **string, JSON_Parse_Error *err) {
     const char *string_start = *string;
     size_t string_len = 0;
-    JSON_Status status = skip_quotes(string);
+    JSON_Status status = skip_quotes(string, err);
     if (status != JSONSuccess) {
         return NULL;
     }
     string_len = *string - string_start - 2; /* length without quotes */
-    return process_string(string_start + 1, string_len);
+    return process_string(string_start + 1, string_len, err);
 }
 
-static JSON_Value * parse_value(const char **string, size_t nesting) {
+/* Parses the outer value in a string and fails if unexpected data follows it */
+static JSON_Value * parse_outer_value(const char **string, size_t nesting, JSON_Parse_Error *err) {
+    JSON_Value * value = parse_value(string, nesting, err);
+
+    if (err->error == JSON_PARSE_ERROR_NONE) {
+        SKIP_WHITESPACES(string);
+        if (**string != '\0') {
+            err->error = JSON_PARSE_ERROR_UNEXPECTED_CHARACTER;
+            json_value_free(value);
+            value = NULL;
+        }
+    }
+    return value;
+}
+
+static JSON_Value * parse_value(const char **string, size_t nesting, JSON_Parse_Error *err) {
     if (nesting > MAX_NESTING) {
+        err->error = JSON_PARSE_ERROR_MAX_NESTING_EXCEEDED;
         return NULL;
     }
     SKIP_WHITESPACES(string);
     switch (**string) {
         case '{':
-            return parse_object_value(string, nesting + 1);
+            return parse_object_value(string, nesting + 1, err);
         case '[':
-            return parse_array_value(string, nesting + 1);
+            return parse_array_value(string, nesting + 1, err);
         case '\"':
-            return parse_string_value(string);
+            return parse_string_value(string, err);
         case 'f': case 't':
-            return parse_boolean_value(string);
+            return parse_boolean_value(string, err);
         case '-':
         case '0': case '1': case '2': case '3': case '4':
         case '5': case '6': case '7': case '8': case '9':
-            return parse_number_value(string);
+            return parse_number_value(string, err);
         case 'n':
-            return parse_null_value(string);
+            return parse_null_value(string, err);
+        case '\0':
+            err->error = JSON_PARSE_ERROR_UNEXPECTED_END_OF_DATA;
+            return NULL;
+        case '}':
+        case ']':
+            err->error = JSON_PARSE_ERROR_UNMATCHED_BRACKET;
+            return NULL;
         default:
+            err->error = JSON_PARSE_ERROR_UNEXPECTED_CHARACTER;
             return NULL;
     }
 }
 
-static JSON_Value * parse_object_value(const char **string, size_t nesting) {
+static JSON_Value * parse_object_value(const char **string, size_t nesting, JSON_Parse_Error *err) {
     JSON_Value *output_value = json_value_init_object(), *new_value = NULL;
     JSON_Object *output_object = json_value_get_object(output_value);
     char *new_key = NULL;
-    if (output_value == NULL || **string != '{') {
+    if (output_value == NULL) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+    }
+    if (**string != '{') {
+        /* should only get here if this has already been checked */
+        err->error = JSON_PARSE_ERROR_INTERNAL;
         return NULL;
     }
     SKIP_CHAR(string);
@@ -668,20 +711,33 @@ static JSON_Value * parse_object_value(const char **string, size_t nesting) {
         return output_value;
     }
     while (**string != '\0') {
-        new_key = get_quoted_string(string);
+        new_key = get_quoted_string(string, err);
         SKIP_WHITESPACES(string);
-        if (new_key == NULL || **string != ':') {
+        if (new_key == NULL) {
+            if (err->error == JSON_PARSE_ERROR_UNQUOTED_STRING && (**string == ':' || **string == ',')) {
+                err->error = JSON_PARSE_ERROR_MISSING_PROPERTY_NAME;
+            }
+            json_value_free(output_value);
+            return NULL;
+        }
+        if (**string != ':') {
+            err->error = JSON_PARSE_ERROR_MISSING_COLON;
             json_value_free(output_value);
             return NULL;
         }
         SKIP_CHAR(string);
-        new_value = parse_value(string, nesting);
+        new_value = parse_value(string, nesting, err);
         if (new_value == NULL) {
             parson_free(new_key);
             json_value_free(output_value);
             return NULL;
         }
         if (json_object_add(output_object, new_key, new_value) == JSONFailure) {
+            if (json_object_get_value(output_object, new_key) != NULL) {
+                err->error = JSON_PARSE_ERROR_OBJECT_PROPERTY_ALREADY_EXISTS;
+            } else {
+                err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+            }
             parson_free(new_key);
             json_value_free(new_value);
             json_value_free(output_value);
@@ -694,21 +750,43 @@ static JSON_Value * parse_object_value(const char **string, size_t nesting) {
         }
         SKIP_CHAR(string);
         SKIP_WHITESPACES(string);
-    }
-    SKIP_WHITESPACES(string);
-    if (**string != '}' || /* Trim object after parsing is over */
-        json_object_resize(output_object, json_object_get_count(output_object)) == JSONFailure) {
+
+        if (**string == '}') {
+            err->error = JSON_PARSE_ERROR_TRAILING_COMMA;
             json_value_free(output_value);
             return NULL;
+        }
+    }
+    SKIP_WHITESPACES(string);
+    if (**string != '}') {
+        if (**string != '\0') {
+            err->error = JSON_PARSE_ERROR_MISSING_COMMA;
+        } else {
+            err->error = JSON_PARSE_ERROR_MISSING_BRACKET;
+        }
+        json_value_free(output_value);
+        return NULL;
+    }
+    /* Trim object after parsing is over */
+    if (json_object_resize(output_object, json_object_get_count(output_object)) == JSONFailure) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+        json_value_free(output_value);
+        return NULL;
     }
     SKIP_CHAR(string);
     return output_value;
 }
 
-static JSON_Value * parse_array_value(const char **string, size_t nesting) {
+static JSON_Value * parse_array_value(const char **string, size_t nesting, JSON_Parse_Error *err) {
     JSON_Value *output_value = json_value_init_array(), *new_array_value = NULL;
     JSON_Array *output_array = json_value_get_array(output_value);
-    if (!output_value || **string != '[') {
+    if (!output_value) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+        return NULL;
+    }
+    if (**string != '[') {
+        /* should only get here if this has already been checked */
+        err->error = JSON_PARSE_ERROR_INTERNAL;
         return NULL;
     }
     SKIP_CHAR(string);
@@ -718,12 +796,16 @@ static JSON_Value * parse_array_value(const char **string, size_t nesting) {
         return output_value;
     }
     while (**string != '\0') {
-        new_array_value = parse_value(string, nesting);
+        new_array_value = parse_value(string, nesting, err);
         if (new_array_value == NULL) {
+            if (err->error == JSON_PARSE_ERROR_UNMATCHED_BRACKET) {
+                err->error = JSON_PARSE_ERROR_TRAILING_COMMA;
+            }
             json_value_free(output_value);
             return NULL;
         }
         if (json_array_add(output_array, new_array_value) == JSONFailure) {
+            err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
             json_value_free(new_array_value);
             json_value_free(output_value);
             return NULL;
@@ -736,61 +818,93 @@ static JSON_Value * parse_array_value(const char **string, size_t nesting) {
         SKIP_WHITESPACES(string);
     }
     SKIP_WHITESPACES(string);
-    if (**string != ']' || /* Trim array after parsing is over */
-        json_array_resize(output_array, json_array_get_count(output_array)) == JSONFailure) {
-            json_value_free(output_value);
-            return NULL;
+    if (**string != ']') {
+        if (**string != '\0') {
+            err->error = JSON_PARSE_ERROR_MISSING_COMMA;
+        } else {
+            err->error = JSON_PARSE_ERROR_MISSING_BRACKET;
+        }
+        json_value_free(output_value);
+        return NULL;
+    }
+    /* Trim array after parsing is over */
+    if (json_array_resize(output_array, json_array_get_count(output_array)) == JSONFailure) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+        json_value_free(output_value);
+        return NULL;
     }
     SKIP_CHAR(string);
     return output_value;
 }
 
-static JSON_Value * parse_string_value(const char **string) {
+static JSON_Value * parse_string_value(const char **string, JSON_Parse_Error *err) {
     JSON_Value *value = NULL;
-    char *new_string = get_quoted_string(string);
+    char *new_string = get_quoted_string(string, err);
     if (new_string == NULL) {
         return NULL;
     }
     value = json_value_init_string_no_copy(new_string);
     if (value == NULL) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
         parson_free(new_string);
         return NULL;
     }
     return value;
 }
 
-static JSON_Value * parse_boolean_value(const char **string) {
+static JSON_Value * parse_boolean_value(const char **string, JSON_Parse_Error *err) {
+    JSON_Value *value = NULL;
     size_t true_token_size = SIZEOF_TOKEN("true");
     size_t false_token_size = SIZEOF_TOKEN("false");
     if (strncmp("true", *string, true_token_size) == 0) {
         *string += true_token_size;
-        return json_value_init_boolean(1);
+        value = json_value_init_boolean(1);
+        if (value == NULL) {
+            err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+        }
     } else if (strncmp("false", *string, false_token_size) == 0) {
         *string += false_token_size;
-        return json_value_init_boolean(0);
+        value = json_value_init_boolean(0);
+        if (value == NULL) {
+            err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+        }
+    } else {
+        err->error = JSON_PARSE_ERROR_UNQUOTED_STRING;
     }
-    return NULL;
+    return value;
 }
 
-static JSON_Value * parse_number_value(const char **string) {
+static JSON_Value * parse_number_value(const char **string, JSON_Parse_Error *err) {
+    JSON_Value *value = NULL;
     char *end;
     double number = 0;
     errno = 0;
     number = strtod(*string, &end);
     if (errno || !is_decimal(*string, end - *string)) {
+        err->error = JSON_PARSE_ERROR_INVALID_NUMBER;
         return NULL;
     }
     *string = end;
-    return json_value_init_number(number);
+    value = json_value_init_number(number);
+    if (value == NULL) {
+        err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+    }
+    return value;
 }
 
-static JSON_Value * parse_null_value(const char **string) {
+static JSON_Value * parse_null_value(const char **string, JSON_Parse_Error *err) {
+    JSON_Value *value = NULL;
     size_t token_size = SIZEOF_TOKEN("null");
     if (strncmp("null", *string, token_size) == 0) {
         *string += token_size;
-        return json_value_init_null();
+        value = json_value_init_null();
+        if (value == NULL) {
+            err->error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+        }
+    } else {
+        err->error = JSON_PARSE_ERROR_UNQUOTED_STRING;
     }
-    return NULL;
+    return value;
 }
 
 /* Serialization */
@@ -1050,17 +1164,19 @@ JSON_Value * json_parse_file_with_comments(const char *filename) {
 }
 
 JSON_Value * json_parse_string(const char *string) {
+    JSON_Parse_Error err;
     if (string == NULL) {
         return NULL;
     }
     if (string[0] == '\xEF' && string[1] == '\xBB' && string[2] == '\xBF') {
         string = string + 3; /* Support for UTF-8 BOM */
     }
-    return parse_value((const char**)&string, 0);
+    return parse_value((const char**)&string, 0, &err);
 }
 
 JSON_Value * json_parse_string_with_comments(const char *string) {
     JSON_Value *result = NULL;
+    JSON_Parse_Error err;
     char *string_mutable_copy = NULL, *string_mutable_copy_ptr = NULL;
     string_mutable_copy = parson_strdup(string);
     if (string_mutable_copy == NULL) {
@@ -1069,8 +1185,105 @@ JSON_Value * json_parse_string_with_comments(const char *string) {
     remove_comments(string_mutable_copy, "/*", "*/");
     remove_comments(string_mutable_copy, "//", "\n");
     string_mutable_copy_ptr = string_mutable_copy;
-    result = parse_value((const char**)&string_mutable_copy_ptr, 0);
+    result = parse_value((const char**)&string_mutable_copy_ptr, 0, &err);
     parson_free(string_mutable_copy);
+    return result;
+}
+
+static void get_line_numbers(const char *start, const char *end, JSON_Parse_Error *err) {
+    size_t byte_offset = 0;
+    size_t line_number = 1;
+    size_t line_offset = 0;
+
+    if (start == NULL || end == NULL) {
+        err->byte_offset = byte_offset;
+        err->line = line_number;
+        err->line_offset = line_offset;
+        return;
+    }
+    while (start != end) {
+        if (*start == '\n') {
+            line_number++;
+            line_offset = 0;
+        } else if (*start != '\r') {
+            line_offset++;
+        }
+        start++;
+        byte_offset++;
+    }
+    err->byte_offset = byte_offset;
+    err->line = line_number;
+    err->line_offset = line_offset;
+}
+
+JSON_Value * json_parse(const char *string, const JSON_Parse_Options *parse_options, JSON_Parse_Error *err)
+{
+    JSON_Value *result = NULL;
+    JSON_Parse_Error error;
+
+    error.error = JSON_PARSE_ERROR_NONE;
+    error.byte_offset = 0;
+    error.line = 1;
+    error.line_offset = 0;
+
+    if (string == NULL) {
+        if (err != NULL) {
+            error.error = JSON_PARSE_ERROR_NO_INPUT;
+            *err = error;
+        }
+        return NULL;
+    }
+    if (parse_options == NULL) {
+        parse_options = &default_options;
+    }
+
+    if (parse_options->string_is_file_path) {
+        /* Parse the file contents with the same options except this one */
+        JSON_Parse_Options remaining_options = *parse_options;
+        char *file_contents = read_file(string);
+        if (!file_contents) {
+            if (err != NULL) {
+                error.error = JSON_PARSE_ERROR_NO_INPUT;
+                *err = error;
+            }
+            return NULL;
+        }
+        remaining_options.string_is_file_path = 0; /* Do not treat the contents as a path */
+        result = json_parse(file_contents, &remaining_options, err);
+        parson_free(file_contents);
+        return result;
+    }
+
+    if (string[0] == '\xEF' && string[1] == '\xBB' && string[2] == '\xBF') {
+        string = string + 3; /* Support for UTF-8 BOM */
+    }
+
+    if (parse_options->accept_comments) {
+        char *string_mutable_copy = NULL, *string_mutable_copy_ptr = NULL;
+        string_mutable_copy = parson_strdup(string);
+        if (string_mutable_copy == NULL) {
+            if (err) {
+                error.error = JSON_PARSE_ERROR_OUT_OF_MEMORY;
+                *err = error;
+            }
+            return NULL;
+        }
+        remove_comments(string_mutable_copy, "/*", "*/");
+        remove_comments(string_mutable_copy, "//", "\n");
+        string_mutable_copy_ptr = string_mutable_copy;
+        result = parse_outer_value((const char**)&string_mutable_copy_ptr, 0, &error);
+        /* parse_value() currently does not calculate line numbers */
+        get_line_numbers(string_mutable_copy, string_mutable_copy_ptr, &error);
+        parson_free(string_mutable_copy);
+    } else {
+        const char *string_copy_ptr = string;
+        result = parse_outer_value((const char**)&string_copy_ptr, 0, &error);
+        /* parse_value() currently does not calculate line numbers */
+        get_line_numbers(string, string_copy_ptr, &error);
+    }
+    if (err != NULL) {
+        *err = error;
+    }
     return result;
 }
 
