@@ -1095,12 +1095,11 @@ static int json_serialize_string(const char *string, size_t len, char *buf) {
 }
 
 static int append_indent(char *buf, int level) {
-    int i;
-    int written = -1, written_total = 0;
-    for (i = 0; i < level; i++) {
-        APPEND_STRING("    ");
-    }
-    return written_total;
+	int count = 4 * level;
+	if (buf != NULL) {
+		memset(buf, ' ', count);
+	}
+	return count;
 }
 
 static int append_string(char *buf, const char *string) {
