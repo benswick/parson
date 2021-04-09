@@ -888,6 +888,9 @@ static JSON_Value * parse_null_value(const char **string) {
                                   if (buf != NULL) { buf += written; }\
                                   written_total += written; } while(0)
 
+#define APPEND_CHAR(ch) do { if (buf != NULL) { *buf = (ch); buf++; }\
+                             written_total++; } while(0)
+
 static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int level, int is_pretty, char *num_buf)
 {
     const char *key = NULL, *string = NULL;
@@ -903,9 +906,9 @@ static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int le
         case JSONArray:
             array = json_value_get_array(value);
             count = json_array_get_count(array);
-            APPEND_STRING("[");
+            APPEND_CHAR('[');
             if (count > 0 && is_pretty) {
-                APPEND_STRING("\n");
+                APPEND_CHAR('\n');
             }
             for (i = 0; i < count; i++) {
                 if (is_pretty) {
@@ -921,23 +924,23 @@ static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int le
                 }
                 written_total += written;
                 if (i < (count - 1)) {
-                    APPEND_STRING(",");
+                    APPEND_CHAR(',');
                 }
                 if (is_pretty) {
-                    APPEND_STRING("\n");
+                    APPEND_CHAR('\n');
                 }
             }
             if (count > 0 && is_pretty) {
                 APPEND_INDENT(level);
             }
-            APPEND_STRING("]");
+            APPEND_CHAR(']');
             return written_total;
         case JSONObject:
             object = json_value_get_object(value);
             count  = json_object_get_count(object);
-            APPEND_STRING("{");
+            APPEND_CHAR('{');
             if (count > 0 && is_pretty) {
-                APPEND_STRING("\n");
+                APPEND_CHAR('\n');
             }
             for (i = 0; i < count; i++) {
                 key = json_object_get_name(object, i);
@@ -956,9 +959,9 @@ static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int le
                     buf += written;
                 }
                 written_total += written;
-                APPEND_STRING(":");
+                APPEND_CHAR(':');
                 if (is_pretty) {
-                    APPEND_STRING(" ");
+                    APPEND_CHAR(' ');
                 }
                 temp_value = json_object_get_value_at(object, i);
                 written = json_serialize_to_buffer_r(temp_value, buf, level+1, is_pretty, num_buf);
@@ -970,16 +973,16 @@ static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int le
                 }
                 written_total += written;
                 if (i < (count - 1)) {
-                    APPEND_STRING(",");
+                    APPEND_CHAR(',');
                 }
                 if (is_pretty) {
-                    APPEND_STRING("\n");
+                    APPEND_CHAR('\n');
                 }
             }
             if (count > 0 && is_pretty) {
                 APPEND_INDENT(level);
             }
-            APPEND_STRING("}");
+            APPEND_CHAR('}');
             return written_total;
         case JSONString:
             string = json_value_get_string(value);
@@ -1031,7 +1034,7 @@ static int json_serialize_string(const char *string, size_t len, char *buf) {
     size_t i = 0;
     char c = '\0';
     int written = -1, written_total = 0;
-    APPEND_STRING("\"");
+    APPEND_CHAR('"');
     for (i = 0; i < len; i++) {
         c = string[i];
         switch (c) {
@@ -1078,7 +1081,7 @@ static int json_serialize_string(const char *string, size_t len, char *buf) {
                 if (parson_escape_slashes) {
                     APPEND_STRING("\\/");  /* to make json embeddable in xml\/html */
                 } else {
-                    APPEND_STRING("/");
+                    APPEND_CHAR('/');
                 }
                 break;
             default:
@@ -1090,7 +1093,7 @@ static int json_serialize_string(const char *string, size_t len, char *buf) {
                 break;
         }
     }
-    APPEND_STRING("\"");
+    APPEND_CHAR('"');
     return written_total;
 }
 
@@ -1111,6 +1114,7 @@ static int append_string(char *buf, const char *string) {
 
 #undef APPEND_STRING
 #undef APPEND_INDENT
+#undef APPEND_CHAR
 
 /* Parser API */
 JSON_Value * json_parse_file(const char *filename) {
